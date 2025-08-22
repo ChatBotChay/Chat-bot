@@ -1,6 +1,13 @@
 version: '3.9'
 
 services:
+  redis:
+    image: redis:7
+    restart: always
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
   db:
     image: postgres:15
     restart: always
@@ -26,13 +33,17 @@ services:
       DATABASE_URL: postgresql+asyncpg://chayuser:chaypass@db:5432/chaybot
     command: bash -c "chmod +x ./wait-for-it.sh && ./wait-for-it.sh db 5432 -- pip install -r requirements.txt && alembic upgrade head"
 
+
   bot:
     build: .
     depends_on:
       migrate:
         condition: service_completed_successfully
+      redis:
+        condition: service_started
     environment:
       DATABASE_URL: postgresql+asyncpg://chayuser:chaypass@db:5432/chaybot
+      REDIS_URL: redis://redis:6379/0
     command: python -m bot.bot
     restart: always
     volumes:
@@ -41,3 +52,4 @@ services:
 
 volumes:
   pgdata:
+  redisdata:
