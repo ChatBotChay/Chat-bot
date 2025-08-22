@@ -13,6 +13,7 @@ class InviteTokenService:
     async def get_restaurant_id(self, token: str):
         await self.queue.connect()
         restaurant_id = await self.queue.redis.get(f"invite:{token}")
+        print(f"Проверка токена: invite:{token} -> {restaurant_id}")
         await self.queue.close()
         return restaurant_id
 

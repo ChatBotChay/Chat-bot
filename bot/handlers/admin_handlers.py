@@ -70,8 +70,8 @@ async def cmd_start(message: Message, state: FSMContext, user):
 	if len(args) > 1:
 		# Обработка приглашения по токену
 		token = args[1]
-
 		restaurant_id = await invite_service.get_restaurant_id(token)
+		print(f"Получен токен: {token}, restaurant_id: {restaurant_id}")
 		if restaurant_id:
 			await state.update_data(invite_token=token, restaurant_id=restaurant_id)
 			await message.answer("Введите ваше имя:")
@@ -82,7 +82,6 @@ async def cmd_start(message: Message, state: FSMContext, user):
 	if not user or user.role not in ("admin", "superadmin", "waiter"):
 		await message.answer("У вас нет доступа к этому боту. Обратитесь к администратору.")
 		return
-	
 
 	kb = admin_kb if user.role == "admin" else None
 	await message.answer(f"Добро пожаловать, {user.first_name}! Вы вошли как {user.role}.", reply_markup=kb)
@@ -141,10 +140,60 @@ async def show_dishes_menu(message: Message, user):
 	kb = InlineKeyboardMarkup(
 		inline_keyboard=[
 			[InlineKeyboardButton(text="➕ Добавить блюдо", callback_data="add_dish")],
-			*[[InlineKeyboardButton(text=f"🍽️ {d.name}", callback_data=f"editdish_{d.id}") for d in dishes]]
+			*[[
+				InlineKeyboardButton(text=f"👁️ {d.name}", callback_data=f"viewdish_{d.id}"),
+				InlineKeyboardButton(text="✏️", callback_data=f"editdish_{d.id}"),
+				InlineKeyboardButton(text="🗑️", callback_data=f"deldish_{d.id}")
+			] for d in dishes]
 		]
 	)
 	await message.answer("Меню блюд:", reply_markup=kb)
+
+# --- Просмотр блюда ---
+@admin_router.callback_query(F.data.startswith("viewdish_"))
+async def admin_view_dish(call: CallbackQuery, user):
+	dish_id = int(call.data.split("_")[1])
+	async with async_session_maker() as session:
+		dao = DAO(session)
+		dish = await dao.get_dish_by_id(dish_id)
+	if not dish or dish.restaurant_id != user.restaurant_id:
+		await call.message.answer("Блюдо не найдено или нет доступа.")
+		await call.answer()
+		return
+	# Формируем карточку блюда
+	from aiogram.types.input_file import FSInputFile
+	from aiogram.types import InputMediaPhoto
+	import re
+	if dish.composition:
+		raw_ingredients = re.split(r",\s*|\s{2,}", dish.composition)
+		ingredients_text = '\n'.join([f"• {i.strip()}" for i in raw_ingredients if i.strip()])
+	else:
+		ingredients_text = "Нет данных"
+	caption = f"<b>{dish.name} 🍽️</b>\n\n<b>Состав:</b>\n{ingredients_text}\n\n<b>Описание:</b>\n{dish.description}"
+	if dish.ready_photo_url:
+		try:
+			media = InputMediaPhoto(media=FSInputFile(dish.ready_photo_url), caption=caption, parse_mode="HTML")
+			await call.message.answer_photo(photo=FSInputFile(dish.ready_photo_url), caption=caption, parse_mode="HTML")
+		except Exception:
+			await call.message.answer(caption, parse_mode="HTML")
+	else:
+		await call.message.answer(caption, parse_mode="HTML")
+	await call.answer()
+
+# --- Удаление блюда ---
+@admin_router.callback_query(F.data.startswith("deldish_"))
+async def admin_delete_dish(call: CallbackQuery, user):
+	dish_id = int(call.data.split("_")[1])
+	async with async_session_maker() as session:
+		dao = DAO(session)
+		dish = await dao.get_dish_by_id(dish_id)
+		if not dish or dish.restaurant_id != user.restaurant_id:
+			await call.answer("Нет доступа или блюдо не найдено", show_alert=True)
+			return
+		await session.delete(dish)
+		await session.commit()
+	await call.message.answer("Блюдо удалено.")
+	await call.answer()
 
 @admin_router.message(F.text.lower() == "📂 категории")
 async def show_categories_menu(message: Message, user):
@@ -492,20 +541,21 @@ async def add_dish_inline(call: CallbackQuery, state: FSMContext, *, user):
 
 @admin_router.message(F.text.lower() == "🤝 сделать приглашение")
 async def invite_waiter_button(message: Message, user):
-    if not user or user.role != "admin":
-        await message.answer("Только админ может приглашать официантов.")
-        return
-    token = secrets.token_urlsafe(16)
-    await invite_service.create_token(token, user.restaurant_id, ttl=900)
-    bot_username = (await message.bot.me()).username
-    invite_link = f"https://t.me/{bot_username}?start={token}"
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Пригласить официанта", url=invite_link)]
-    ])
-    await message.answer(
-        "Ссылка для приглашения официанта (действует 15 минут):",
-        reply_markup=kb
-    )
+	if not user or user.role != "admin":
+		await message.answer("Только админ может приглашать официантов.")
+		return
+	token = secrets.token_urlsafe(16)
+	await invite_service.create_token(token, user.restaurant_id, ttl=900)
+	bot_username = (await message.bot.me()).username
+	invite_link = f"https://t.me/{bot_username}?start={token}"
+	print(f"Сгенерирована ссылка приглашения: {invite_link}")
+	kb = InlineKeyboardMarkup(inline_keyboard=[
+		[InlineKeyboardButton(text="Пригласить официанта", url=invite_link)]
+	])
+	await message.answer(
+		"Ссылка для приглашения официанта (действует 15 минут):",
+		reply_markup=kb
+	)
 
 @admin_router.message(F.text.lower() == "🧑‍🤝‍🧑 штат")
 async def show_waiters(message: Message, user):

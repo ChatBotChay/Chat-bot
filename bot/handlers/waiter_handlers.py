@@ -15,12 +15,30 @@ class WaiterMenuStates(StatesGroup):
     waiting_for_category = State()
     waiting_for_dish = State()
     viewing_dish = State()
+    reg_name = State()
+    reg_surname = State()
+
 
 @waiter_router.message(CommandStart())
 async def universal_start(message: Message, state: FSMContext, user):
+    # Если пользователь не найден, пробуем регистрацию по токену
     if not user:
-        await message.answer("У вас нет доступа к этому боту. Обратитесь к администратору.")
-        return
+        # Проверяем, есть ли токен в deep-link
+        if message.text and len(message.text.split()) > 1:
+            token = message.text.split()[1]
+            from database.invite_token_service import InviteTokenService
+            invite_service = InviteTokenService()
+            restaurant_id = await invite_service.get_restaurant_id(token)
+            if not restaurant_id:
+                await message.answer("Некорректная или устаревшая ссылка-приглашение. Обратитесь к администратору.")
+                return
+            await state.update_data(token=token, restaurant_id=restaurant_id)
+            await message.answer("Введите ваше имя:")
+            await state.set_state(WaiterMenuStates.reg_name)
+            return
+        else:
+            await message.answer("У вас нет доступа к этому боту. Обратитесь к администратору.")
+            return
     if user.role == "waiter":
         kb = ReplyKeyboardMarkup(
             keyboard=[[KeyboardButton(text="Тест"), KeyboardButton(text="Меню")]],
@@ -40,6 +58,51 @@ async def universal_start(message: Message, state: FSMContext, user):
         # Можно добавить state для админа, если нужно
     else:
         await message.answer("У вас нет доступа к этому боту. Обратитесь к администратору.")
+
+
+# FSM: регистрация официанта по deep-link токену
+@waiter_router.message(WaiterMenuStates.reg_name)
+async def reg_name(message: Message, state: FSMContext):
+    await state.update_data(first_name=message.text.strip())
+    await message.answer("Введите вашу фамилию:")
+    await state.set_state(WaiterMenuStates.reg_surname)
+
+@waiter_router.message(WaiterMenuStates.reg_surname)
+async def reg_surname(message: Message, state: FSMContext):
+    data = await state.get_data()
+    first_name = data.get("first_name")
+    last_name = message.text.strip()
+    restaurant_id = int(data.get("restaurant_id"))
+    token = data.get("token")
+    user_id = str(message.from_user.id)
+    username = message.from_user.username or ""
+    async with async_session_maker() as session:
+        dao = DAO(session)
+        # Проверяем, не существует ли уже такой пользователь
+        existing = await dao.get_user_by_tg_id(user_id)
+        if existing:
+            await message.answer("Вы уже зарегистрированы.")
+            await state.clear()
+            return
+        await dao.create_user(
+            first_name=first_name,
+            last_name=last_name,
+            tg_username=username,
+            tg_id=user_id,
+            role="waiter",
+            restaurant_id=restaurant_id
+        )
+    # Удаляем токен, чтобы нельзя было использовать повторно
+    from database.invite_token_service import InviteTokenService
+    invite_service = InviteTokenService()
+    await invite_service.delete_token(token)
+    await session.commit()
+    kb = ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="Тест"), KeyboardButton(text="Меню")]],
+        resize_keyboard=True
+    )
+    await message.answer(f"Регистрация завершена! Добро пожаловать, {first_name}!", reply_markup=kb)
+    await state.set_state(WaiterMenuStates.waiting_for_choice)
 
 
 @waiter_router.message(WaiterMenuStates.waiting_for_choice)
